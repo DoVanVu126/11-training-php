@@ -1,100 +1,106 @@
 <?php
+require_once __DIR__ . '/../configs/database.php';
 
-require_once 'BaseModel.php';
+class UserModel
+{
+    private $pdo;
 
-class UserModel extends BaseModel {
-
-    public function findUserById($id) {
-        $sql = 'SELECT * FROM users WHERE id = '.$id;
-        $user = $this->select($sql);
-
-        return $user;
+    public function __construct()
+    {
+        $dsn = "mysql:host=" . DB_HOST . ";port=" . DB_PORT . ";dbname=" . DB_NAME . ";charset=utf8mb4";
+        $this->pdo = new PDO($dsn, DB_USER, DB_PASSWORD, [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        ]);
     }
 
-    public function findUser($keyword) {
-        $sql = 'SELECT * FROM users WHERE user_name LIKE %'.$keyword.'%'. ' OR user_email LIKE %'.$keyword.'%';
-        $user = $this->select($sql);
-
-        return $user;
+    public function findUserById(int $id)
+    {
+        $stmt = $this->pdo->prepare('SELECT id, name, fullname, email, type FROM users WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => $id]);
+        return $stmt->fetch() ?: false;
     }
 
-    /**
-     * Authentication user
-     * @param $userName
-     * @param $password
-     * @return array
-     */
-    public function auth($userName, $password) {
-        $md5Password = md5($password);
-        $sql = 'SELECT * FROM users WHERE name = "' . $userName . '" AND password = "'.$md5Password.'"';
-
-        $user = $this->select($sql);
-        return $user;
+    public function findUser(string $keyword)
+    {
+        $kw = '%' . $keyword . '%';
+        $stmt = $this->pdo->prepare('SELECT id, name, fullname, email, type FROM users WHERE name LIKE :kw OR email LIKE :kw');
+        $stmt->execute([':kw' => $kw]);
+        return $stmt->fetchAll();
     }
 
-    /**
-     * Delete user by id
-     * @param $id
-     * @return mixed
-     */
-    public function deleteUserById($id) {
-        $sql = 'DELETE FROM users WHERE id = '.$id;
-        return $this->delete($sql);
-
+    public function auth(string $userName, string $password)
+    {
+        $stmt = $this->pdo->prepare('SELECT id, name, password FROM users WHERE name = :username LIMIT 1');
+        $stmt->execute([':username' => $userName]);
+        $user = $stmt->fetch();
+        if ($user && md5($password) === $user['password']) {
+            return [['id' => $user['id'], 'name' => $user['name']]];
+        }
+        return false;
     }
 
-    /**
-     * Update user
-     * @param $input
-     * @return mixed
-     */
-    public function updateUser($input) {
-        $sql = 'UPDATE users SET 
-                 name = "' . mysqli_real_escape_string(self::$_connection, $input['name']) .'", 
-                 password="'. md5($input['password']) .'"
-                WHERE id = ' . $input['id'];
-
-        $user = $this->update($sql);
-
-        return $user;
+    public function deleteUserById(int $id)
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM users WHERE id = :id');
+        return $stmt->execute([':id' => $id]);
     }
 
-    /**
-     * Insert user
-     * @param $input
-     * @return mixed
-     */
-    public function insertUser($input) {
-        $sql = "INSERT INTO `app_web1`.`users` (`name`, `password`) VALUES (" .
-                "'" . $input['name'] . "', '".md5($input['password'])."')";
-
-        $user = $this->insert($sql);
-
-        return $user;
-    }
-
-    /**
-     * Search users
-     * @param array $params
-     * @return array
-     */
-    public function getUsers($params = []) {
-        //Keyword
-        if (!empty($params['keyword'])) {
-            $sql = 'SELECT * FROM users WHERE name LIKE "%' . $params['keyword'] .'%"';
-
-            //Keep this line to use Sql Injection
-            //Don't change
-            //Example keyword: abcef%";TRUNCATE banks;##
-            $users = self::$_connection->multi_query($sql);
-
-            //Get data
-            $users = $this->query($sql);
-        } else {
-            $sql = 'SELECT * FROM users';
-            $users = $this->select($sql);
+    public function updateUser(array $input)
+    {
+        $id = (int)($input['id'] ?? 0);
+        $name = trim($input['name'] ?? '');
+        if ($id <= 0 || $name === '') {
+            throw new InvalidArgumentException('Invalid input');
         }
 
-        return $users;
+        if (!empty($input['password'])) {
+            $pwHash = md5($input['password']);
+            $stmt = $this->pdo->prepare('UPDATE users SET name = :name, password = :pw WHERE id = :id');
+            return $stmt->execute([':name' => $name, ':pw' => $pwHash, ':id' => $id]);
+        } else {
+            $stmt = $this->pdo->prepare('UPDATE users SET name = :name WHERE id = :id');
+            return $stmt->execute([':name' => $name, ':id' => $id]);
+        }
+    }
+
+    public function insertUser(array $input)
+    {
+        $name = trim($input['name'] ?? '');
+        $password = $input['password'] ?? '';
+        $fullname = $input['fullname'] ?? null;
+        $email = $input['email'] ?? null;
+        $type = $input['type'] ?? 'user';
+
+        if ($name === '' || $password === '') {
+            throw new InvalidArgumentException('Invalid input');
+        }
+
+        $pwHash = md5($password);
+        $stmt = $this->pdo->prepare('INSERT INTO users (name, fullname, email, type, password) VALUES (:name, :fullname, :email, :type, :pw)');
+        $stmt->execute([
+            ':name' => $name,
+            ':fullname' => $fullname,
+            ':email' => $email,
+            ':type' => $type,
+            ':pw' => $pwHash
+        ]);
+        return $this->pdo->lastInsertId();
+    }
+
+    public function getUsers(array $params = [])
+    {
+        $sql = 'SELECT id, name, fullname, email, type FROM users';
+        $bindings = [];
+        if (!empty($params['keyword'])) {
+            $sql .= ' WHERE name LIKE :kw OR fullname LIKE :kw OR email LIKE :kw';
+            $bindings[':kw'] = '%' . $params['keyword'] . '%';
+        }
+        $sql .= ' ORDER BY id DESC';
+
+        $stmt = $this->pdo->prepare($sql);
+        foreach ($bindings as $k => $v) $stmt->bindValue($k, $v, PDO::PARAM_STR);
+        $stmt->execute();
+        return $stmt->fetchAll();
     }
 }
